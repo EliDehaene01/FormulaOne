@@ -1,0 +1,7 @@
+requests
+pandas
+torch
+openai
+python-dotenv
+fastapi
+uvicorn

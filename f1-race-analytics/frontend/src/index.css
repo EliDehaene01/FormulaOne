@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/*
+ * These map Radix UI's actual DOM attributes (data-state="active"/"open"/
+ * "closed", data-orientation, data-disabled, data-placeholder) to the short
+ * custom variant names (data-active:, data-horizontal:, etc.) the
+ * shadcn/ui "radix-nova" style components use. `shadcn init` normally
+ * writes these automatically — ours crashed partway through (a CLI bug
+ * with this project's folder layout, see frontend/README or git history),
+ * so they're added by hand here based on Radix's documented attributes.
+ */
+@custom-variant data-active (&[data-state="active"]);
+@custom-variant data-open (&[data-state="open"]);
+@custom-variant data-closed (&[data-state="closed"]);
+@custom-variant data-horizontal (&[data-orientation="horizontal"]);
+@custom-variant data-vertical (&[data-orientation="vertical"]);
+@custom-variant data-disabled (&[data-disabled]);
+@custom-variant data-placeholder (&[data-placeholder]);
+
+/*
+ * Dark-only, data-dense dashboard theme (Phase 0 design decision) — no
+ * light-mode toggle, this app doesn't need one. Colors chosen to look
+ * motorsport-adjacent (carbon background, red accent) without copying any
+ * real team's livery colors.
+ *
+ * shadcn/ui components reference these as Tailwind utilities like
+ * `bg-primary`/`text-foreground` — the `@theme inline` block below is what
+ * wires plain CSS custom properties into Tailwind v4's utility generator.
+ */
+:root {
+  --radius: 0.5rem;
+
+  --background: #0b0d12;
+  --foreground: #e5e7eb;
+  --card: #12141b;
+  --card-foreground: #e5e7eb;
+  --primary: #ef4444;
+  --primary-foreground: #fff5f5;
+  --secondary: #1f2230;
+  --secondary-foreground: #e5e7eb;
+  --muted: #1a1c25;
+  --muted-foreground: #9aa1b1;
+  --accent: #1a1c25;
+  --accent-foreground: #e5e7eb;
+  --destructive: #dc2626;
+  --border: #262a38;
+  --input: #262a38;
+  --ring: #ef4444;
+}
+
+@theme inline {
+  --font-sans: "Fira Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Fira Code", ui-monospace, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+}
