@@ -190,6 +190,14 @@ def get_lap_times(session_key: int, driver_number: int | None = None) -> list[di
 
     df = pd.read_sql(query, conn, params=params)
     conn.close()
+    # An in/out lap, a red-flag-affected lap, or a deleted sector time all
+    # leave these NaN in OpenF1's own data (confirmed: ~4-9% of rows across
+    # the cache) -- not valid JSON, so this was silently 500ing the chart
+    # endpoints AND crashing chat (this is also a registered LLM tool, and
+    # backend/llm/client.py's tool-result json.dumps has no NaN guard of its
+    # own) on any session where the model asked about the wrong lap.
+    for col in ("lap_duration", "duration_sector_1", "duration_sector_2", "duration_sector_3"):
+        df[col] = df[col].astype(object).where(df[col].notna(), None)
     return df.to_dict("records")
 
 
@@ -470,6 +478,11 @@ def get_intervals(session_key: int, driver_number: int | None = None) -> list[di
     query += " ORDER BY date"
     df = pd.read_sql(query, conn, params=params)
     conn.close()
+    # The leader has no gap_to_leader (nothing ahead of them), and interval
+    # can be briefly missing too -- both NaN, not valid JSON (silently
+    # 500ing this endpoint on any Race/Sprint session with a clear leader).
+    for col in ("gap_to_leader", "interval"):
+        df[col] = df[col].astype(object).where(df[col].notna(), None)
     return df.to_dict("records")
 
 
@@ -513,7 +526,7 @@ def get_session_result(session_key: int) -> list[dict]:
     # not valid JSON (was silently 500ing this whole endpoint, which the UI
     # can't tell apart from "no results at all"). gap_to_leader is handled
     # the same way for the same reason (it can also be missing outright).
-    for col in ("duration", "gap_to_leader"):
+    for col in ("position", "duration", "gap_to_leader"):
         df[col] = df[col].astype(object).where(df[col].notna(), None)
     return df.to_dict("records")
 

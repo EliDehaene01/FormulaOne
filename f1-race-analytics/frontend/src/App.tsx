@@ -12,12 +12,16 @@ function App() {
 
   return (
     <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-6 py-8">
-      <header className="border-border flex flex-wrap items-center justify-between gap-4 border-b pb-4">
+      <header className="relative flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4 after:absolute after:inset-x-0 after:bottom-[-1px] after:h-px after:bg-gradient-to-r after:from-primary/60 after:via-transparent after:to-transparent">
         <div>
+          <div className="mb-1 flex items-center gap-2">
+            <span className="status-dot" aria-hidden="true" />
+            <span className="font-mono text-[0.65rem] font-medium tracking-[0.2em] text-muted-foreground uppercase">System online</span>
+          </div>
           <h1 className="text-2xl font-semibold tracking-tight">
             Pit <span className="text-primary">Wall</span>
           </h1>
-          <p className="text-muted-foreground text-sm">F1 race analytics, grounded in real session data</p>
+          <p className="font-mono text-xs tracking-wide text-muted-foreground">F1 race analytics, grounded in real session data</p>
         </div>
         <RaceSelector selected={selected?.sessionKey ?? null} onSelect={(sessionKey, label) => setSelected({ sessionKey, label })} />
       </header>
