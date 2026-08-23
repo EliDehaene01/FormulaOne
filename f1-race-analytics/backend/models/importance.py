@@ -36,7 +36,7 @@ import torch
 from backend.data.cache import DB_PATH
 from backend.models.features import NUMERIC_FEATURE_COLUMNS, build_feature_table
 from backend.models.model import QualifyingLapTimePredictor
-from backend.models.train import CHECKPOINT_PATH, _apply_category_index, _temporal_split, _to_tensors
+from backend.models.train import CHECKPOINT_PATH, _temporal_split, _to_tensors
 
 N_REPEATS = 10
 

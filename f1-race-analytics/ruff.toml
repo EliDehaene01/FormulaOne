@@ -1,0 +1,10 @@
+# CI lint gate for backend/ -- see .github/workflows/ci.yml.
+#
+# Deliberately narrow: E9 (syntax errors) + F (pyflakes: unused imports,
+# undefined names, etc.) only, not the full stylistic rule set. This is a
+# correctness gate, not a style rewrite of a codebase that's never been
+# linted before.
+line-length = 130
+
+[lint]
+select = ["E9", "F"]

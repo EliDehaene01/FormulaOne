@@ -1,0 +1,54 @@
+name: Scheduled Data Refresh
+
+on:
+  schedule:
+    # Sundays 22:00 UTC -- a few hours after a typical Sunday Grand Prix
+    # finishes, so OpenF1 has posted the session's results/lap data by then.
+    - cron: "0 22 * * 0"
+  workflow_dispatch: {} # manual trigger from the Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # gh run download, to restore last run's cache below
+    defaults:
+      run:
+        working-directory: f1-race-analytics
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: f1-race-analytics/backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      # backend/storage/cache.sqlite is gitignored (regenerated data, not
+      # meant to live in git) -- so unlike the checked-out repo, it doesn't
+      # come back "for free" on every run. Carry it forward as this
+      # workflow's own build artifact instead of starting from empty.
+      - name: Restore cache from the last successful run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh run list --workflow=data-refresh.yml --status=success --limit=1 --json databaseId --jq '.[0].databaseId' || echo "")
+          if [ -n "$RUN_ID" ]; then
+            gh run download "$RUN_ID" --name cache-sqlite --dir backend/storage
+          else
+            echo "No previous successful run found -- starting fresh."
+          fi
+
+      - name: Check OpenF1 for newly completed sessions
+        run: python -m backend.data.refresh
+
+      - name: Upload updated cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-sqlite
+          path: f1-race-analytics/backend/storage/cache.sqlite
+          retention-days: 90
