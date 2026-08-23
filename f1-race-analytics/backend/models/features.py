@@ -444,6 +444,13 @@ def _race_level_table(conn: sqlite3.Connection, sessions: pd.DataFrame) -> pd.Da
     race_key_list = race_sessions["session_key"].tolist()
 
     result = pd.read_sql("SELECT session_key, driver_number, position, gap_to_leader, dnf FROM session_result", conn)
+    # OpenF1 represents a lapped-down finisher's gap as text ("+1 LAP", "+2
+    # LAPS") instead of a numeric seconds gap — there's no honest way to
+    # convert "one lap down" into a seconds figure without more assumptions
+    # than this feature is worth, so those rows become NaN here (same
+    # missing-value treatment every other gap in this table already gets,
+    # not a fabricated number).
+    result["gap_to_leader"] = pd.to_numeric(result["gap_to_leader"], errors="coerce")
     result = result[result["session_key"].isin(race_key_list)].merge(race_sessions, on="session_key")
 
     grid = pd.read_sql("SELECT session_key, driver_number, position AS grid_position FROM starting_grid", conn)

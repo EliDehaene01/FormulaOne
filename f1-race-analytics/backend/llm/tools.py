@@ -606,6 +606,39 @@ def predict_qualifying_pace(session_key: int) -> dict:
     }
 
 
+def explain_qualifying_prediction(session_key: int, driver_number: int, top_n: int = 8) -> dict:
+    """
+    Explains ONE driver's qualifying prediction: how much each input (driver
+    identity, team identity, circuit identity, and individual numeric
+    features like practice pace) pushed the predicted lap time up or down,
+    via Captum Integrated Gradients against a neutral baseline (unknown
+    driver/team/circuit, average conditions). Call this when the user asks
+    WHY the model predicted what it did — not on every prediction request.
+
+    LIMITATION: same underlying model as predict_qualifying_pace — see that
+    caveat and backend/models/README.md. Explaining an unreliable model's
+    reasoning is still useful (it shows what it actually leaned on), but
+    isn't a claim that the reasoning is sound.
+    """
+    from backend.models.explain import explain_prediction
+    from backend.models.train import CHECKPOINT_PATH
+
+    if not CHECKPOINT_PATH.exists():
+        return {"error": "no trained model checkpoint found — run `python -m backend.models.train` first"}
+
+    try:
+        result = explain_prediction(session_key, driver_number)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    result["contributions"] = result["contributions"][:top_n]
+    result["caveat"] = (
+        "This first-pass model has not yet been shown to beat a simple baseline (see backend/models/README.md) — "
+        "these attributions show what the model leaned on, not proof its reasoning is sound. Frame as an estimate, never certainty."
+    )
+    return result
+
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -892,6 +925,27 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "explain_qualifying_prediction",
+            "description": (
+                "Explain WHY the qualifying model predicted what it did for one driver in one session — which "
+                "inputs (driver identity, team identity, circuit identity, practice pace, weather, form, etc.) "
+                "pushed the predicted lap time up or down, ranked by influence. Call this only when the user asks "
+                "for the reasoning behind a prediction (e.g. 'why do you think he'll be fastest'), not on every "
+                "prediction request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_key": {"type": "integer"},
+                    "driver_number": {"type": "integer"},
+                },
+                "required": ["session_key", "driver_number"],
+            },
+        },
+    },
 ]
 
 TOOL_DISPATCH = {
@@ -916,4 +970,5 @@ TOOL_DISPATCH = {
     "get_team_championship_standings": get_team_championship_standings,
     "get_driver_season_summary": get_driver_season_summary,
     "predict_qualifying_pace": predict_qualifying_pace,
+    "explain_qualifying_prediction": explain_qualifying_prediction,
 }

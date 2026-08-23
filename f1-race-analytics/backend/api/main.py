@@ -167,6 +167,32 @@ def race_prediction(session_key: int):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.get("/api/races/{session_key}/prediction/explain")
+def race_prediction_explain(session_key: int, driver_number: int):
+    try:
+        return tools.explain_qualifying_prediction(session_key, driver_number)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/model/feature-importance")
+def model_feature_importance():
+    """
+    Global permutation importance (backend/models/importance.py) — NOT
+    session-scoped, it's a property of the trained model itself, measured
+    once against its validation split. Recomputed on every call rather than
+    cached, same "simplest thing that works" choice as predict_qualifying_pace
+    above; it costs a few seconds, not enough to justify a cache for a
+    portfolio project's traffic.
+    """
+    from backend.models.importance import compute_permutation_importance  # lazy: same torch reasoning as predict_qualifying_pace
+
+    try:
+        return compute_permutation_importance().to_dict("records")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/api/races/{session_key}/summary")
 def race_summary(session_key: int):
     try:

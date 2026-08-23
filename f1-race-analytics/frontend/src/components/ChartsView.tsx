@@ -248,7 +248,12 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
                 { key: "position", label: "Pos", render: (r) => (r.dnf ? "DNF" : r.dns ? "DNS" : r.dsq ? "DSQ" : (r.position ?? "—")) },
                 { key: "driver_number", label: "Driver", render: (r) => nameOf(r.driver_number) },
                 { key: "number_of_laps", label: "Laps", align: "right" },
-                { key: "gap_to_leader", label: "Gap", align: "right", render: (r) => (r.gap_to_leader != null ? `+${r.gap_to_leader.toFixed(3)}s` : "—") },
+                {
+                  key: "gap_to_leader",
+                  label: "Gap",
+                  align: "right",
+                  render: (r) => (typeof r.gap_to_leader === "number" ? `+${r.gap_to_leader.toFixed(3)}s` : (r.gap_to_leader ?? "—")),
+                },
               ]}
             />
           )}
