@@ -14,8 +14,12 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to repo root -- an unanchored "lib/" also matched
+# f1-race-analytics/frontend/src/lib/, silently excluding api.ts/utils.ts/
+# colors.ts from git since the first commit (invisible locally because
+# untracked files stay on disk; broke CI's fresh-checkout build instead).
+/lib/
+/lib64/
 parts/
 sdist/
 var/
