@@ -1,0 +1,9 @@
+artifact_location: file:///C:/Users/elide/Documents/GitHub/FormulaOne/f1-race-analytics/backend/storage/mlruns/104831287542412937
+creation_time: 1787501739736
+effective_trace_archival_retention: null
+experiment_id: '104831287542412937'
+last_update_time: 1787501739736
+lifecycle_stage: active
+name: qualifying-lap-time-predictor
+trace_location: null
+workspace: default

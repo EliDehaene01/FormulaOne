@@ -39,9 +39,10 @@ matters.
 
 import argparse
 
+import mlflow
 import optuna
 
-from backend.models.train import EARLY_STOP_PATIENCE, MAX_EPOCHS, train_model
+from backend.models.train import EARLY_STOP_PATIENCE, MAX_EPOCHS, _configure_mlflow, train_model
 
 # Deliberately smaller than train.py's full budget (MAX_EPOCHS/
 # EARLY_STOP_PATIENCE) — with dozens of trials, each one needs to be cheap.
@@ -74,6 +75,10 @@ def _objective(trial: optuna.Trial) -> float:
         max_epochs=TUNING_MAX_EPOCHS,
         early_stop_patience=TUNING_EARLY_STOP_PATIENCE,
         save_checkpoint=False,
+        # Tags this trial's MLflow run with which Optuna trial it is, so the
+        # whole search is actually visible/filterable in the UI — not just
+        # 50 identically-named runs with no way to tell them apart.
+        mlflow_tags={"optuna_trial_number": str(trial.number)},
     )
 
 
@@ -92,6 +97,7 @@ def retrain_best(best_params: dict) -> None:
         batch_size=best_params["batch_size"],
         weight_decay=best_params["weight_decay"],
         save_checkpoint=True,
+        mlflow_tags={"run_type": "tuning_winner"},  # overrides train_model()'s default "final" tag with a more specific one
     )
 
 
@@ -105,20 +111,34 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=0))
-    study.optimize(_objective, n_trials=args.n_trials)
+    # A parent run wrapping the whole sweep — every trial (and the final
+    # retrain) nests under it (see train_model()'s nested=True), so the
+    # MLflow UI shows one "hyperparameter_sweep" run you can drill into,
+    # not 50+ unrelated runs flooding the experiment's top-level list.
+    # _configure_mlflow() first: train_model() also calls it, but not until
+    # the FIRST trial actually runs — too late to affect which experiment
+    # THIS (outer) run lands in.
+    _configure_mlflow()
+    with mlflow.start_run(run_name="hyperparameter_sweep"):
+        mlflow.log_param("n_trials", args.n_trials)
 
-    print(f"\nBest val MAE across {args.n_trials} trials: {study.best_value:.3f}s")
-    print("Best hyperparameters:")
-    for key, value in study.best_params.items():
-        print(f"  {key}: {value}")
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=0))
+        study.optimize(_objective, n_trials=args.n_trials)
 
-    if args.no_retrain:
-        print("\n--no-retrain set: qualifying_model.pt left untouched.")
-        return
+        print(f"\nBest val MAE across {args.n_trials} trials: {study.best_value:.3f}s")
+        print("Best hyperparameters:")
+        for key, value in study.best_params.items():
+            print(f"  {key}: {value}")
 
-    print("\nRetraining with the winning hyperparameters at the full epoch budget...")
-    retrain_best(study.best_params)
+        mlflow.log_metric("best_val_mae_s", study.best_value)
+        mlflow.log_params({f"best_{k}": v for k, v in study.best_params.items()})
+
+        if args.no_retrain:
+            print("\n--no-retrain set: qualifying_model.pt left untouched.")
+            return
+
+        print("\nRetraining with the winning hyperparameters at the full epoch budget...")
+        retrain_best(study.best_params)
 
 
 if __name__ == "__main__":

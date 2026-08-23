@@ -19,8 +19,10 @@ implementation, called either with fixed defaults (this script) or
 trial-suggested values (tune.py).
 """
 
+import os
 import sqlite3
 
+import mlflow
 import numpy as np
 import pandas as pd
 import torch
@@ -36,6 +38,30 @@ EARLY_STOP_PATIENCE = 20  # stop if val MAE hasn't improved in this many epochs
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 CHECKPOINT_PATH = DB_PATH.parent / "qualifying_model.pt"
+
+
+def _configure_mlflow() -> None:
+    """
+    Entirely local — no Azure resource, no network call. Runs land in
+    backend/storage/mlruns/ (same place cache.sqlite, the Chroma index, and
+    the checkpoint itself already live) as plain files; `mlflow ui` (run
+    from f1-race-analytics/) reads them to serve the local dashboard. See
+    backend/models/README.md for how to view it.
+
+    Called from train_model() itself, NOT at module import time — this
+    module's CHECKPOINT_PATH/_apply_category_index/etc. are also imported
+    by the live chat app's predict_qualifying_pace/explain_qualifying_prediction
+    tools (backend/llm/tools.py), which have nothing to do with training;
+    those shouldn't pay for (or create) MLflow setup just by being imported.
+
+    MLflow 3.x deprecated the plain filesystem backend in favor of a
+    database one (e.g. sqlite) by default — MLFLOW_ALLOW_FILE_STORE is its
+    own documented opt-out for exactly this "just track runs in a local
+    folder, no server" use case, which is all this project needs.
+    """
+    os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
+    mlflow.set_tracking_uri((DB_PATH.parent / "mlruns").as_uri())
+    mlflow.set_experiment("qualifying-lap-time-predictor")
 
 
 def _temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -128,6 +154,7 @@ def train_model(
     max_epochs: int = MAX_EPOCHS,
     early_stop_patience: int = EARLY_STOP_PATIENCE,
     save_checkpoint: bool = True,
+    mlflow_tags: dict[str, str] | None = None,
 ) -> float:
     """
     Returns the best validation MAE (seconds) achieved — the value
@@ -135,7 +162,57 @@ def train_model(
     exists so a tuning trial can train and be scored WITHOUT overwriting
     qualifying_model.pt on every single trial; only the final, winning
     hyperparameter set (via tune.py's retrain_best()) sets it True.
+
+    Every call is its own MLflow run (nested=True: if tune.py already has a
+    parent "hyperparameter_sweep" run open, this nests under it instead of
+    starting a sibling top-level run; called with no active run, e.g. a
+    plain `python -m backend.models.train`, it just starts a normal
+    top-level one). mlflow_tags lets a caller attach extra context —
+    tune.py tags each trial with its Optuna trial number, and the winning
+    retrain with "tuning_winner" — without train_model() needing to know
+    anything about Optuna itself.
     """
+    _configure_mlflow()
+    with mlflow.start_run(nested=True):
+        mlflow.set_tag("run_type", "final" if save_checkpoint else "trial")
+        if mlflow_tags:
+            mlflow.set_tags(mlflow_tags)
+        return _train_model(
+            hidden_sizes=hidden_sizes,
+            dropout=dropout,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            weight_decay=weight_decay,
+            max_epochs=max_epochs,
+            early_stop_patience=early_stop_patience,
+            save_checkpoint=save_checkpoint,
+        )
+
+
+def _train_model(
+    hidden_sizes: tuple[int, ...],
+    dropout: float,
+    learning_rate: float,
+    batch_size: int,
+    weight_decay: float,
+    max_epochs: int,
+    early_stop_patience: int,
+    save_checkpoint: bool,
+) -> float:
+    """The actual training loop — see train_model() above, which wraps this in the MLflow run and just forwards every argument."""
+    mlflow.log_params(
+        {
+            "hidden_sizes": ",".join(str(h) for h in hidden_sizes),
+            "n_layers": len(hidden_sizes),
+            "dropout": dropout,
+            "learning_rate": learning_rate,
+            "batch_size": batch_size,
+            "weight_decay": weight_decay,
+            "max_epochs": max_epochs,
+            "early_stop_patience": early_stop_patience,
+        }
+    )
+
     conn = sqlite3.connect(DB_PATH)
     df = build_feature_table(conn)
     conn.close()
@@ -200,6 +277,20 @@ def train_model(
         dropout=dropout,
     ).to(device)  # moves every parameter tensor onto the chosen device; must match where the input tensors live
 
+    # Not currently tunable (see model.py's constructor defaults) but still
+    # a real hyperparameter of this run — logged so it's visible in MLflow
+    # even though every run today uses the same fixed values.
+    mlflow.log_params(
+        {
+            "driver_embed_dim": model.driver_embedding.embedding_dim,
+            "team_embed_dim": model.team_embedding.embedding_dim,
+            "circuit_embed_dim": model.circuit_embedding.embedding_dim,
+            "num_drivers": len(driver_map),
+            "num_teams": len(team_map),
+            "num_circuits": len(circuit_map),
+        }
+    )
+
     # DataLoader batches + shuffles the training set each epoch. Shuffling
     # matters: without it, the model would see sessions in strict
     # chronological order every epoch and could pick up on spurious
@@ -254,6 +345,8 @@ def train_model(
             val_predictions = model(val_driver, val_team, val_circuit, val_numeric)
             val_mae = eval_criterion(val_predictions, val_target).item()
 
+        mlflow.log_metric("val_mae_s", val_mae, step=epoch)  # per-epoch, so MLflow's run page shows the actual training curve, not just a final number
+
         if val_mae < best_val_mae:
             best_val_mae = val_mae
             best_state_dict = {k: v.clone() for k, v in model.state_dict().items()}
@@ -278,7 +371,9 @@ def train_model(
     model.load_state_dict(best_state_dict)  # restore the best-seen weights, discarding any overfitting since then
     model.eval()
 
-    _report_results(model, device, train_df, val_df, test_df, driver_map, team_map, circuit_map, numeric_mean, numeric_std)
+    final_metrics = _report_results(model, device, train_df, val_df, test_df, driver_map, team_map, circuit_map, numeric_mean, numeric_std)
+    mlflow.log_metrics(final_metrics)
+    mlflow.log_metric("best_val_mae_s", best_val_mae)
 
     if save_checkpoint:
         torch.save(
@@ -296,6 +391,7 @@ def train_model(
             CHECKPOINT_PATH,
         )
         print(f"\nSaved checkpoint to {CHECKPOINT_PATH}")
+        mlflow.log_artifact(str(CHECKPOINT_PATH))
 
     return best_val_mae
 
@@ -307,8 +403,10 @@ def _nn_predict(model, device, df, driver_map, team_map, circuit_map, numeric_me
     return pd.Series(predictions.cpu().numpy(), index=df.index)
 
 
-def _report_results(model, device, train_df, val_df, test_df, driver_map, team_map, circuit_map, numeric_mean, numeric_std) -> None:
+def _report_results(model, device, train_df, val_df, test_df, driver_map, team_map, circuit_map, numeric_mean, numeric_std) -> dict[str, float]:
+    """Prints the baseline-vs-neural-net comparison per split (unchanged), and ALSO returns every number in it flattened into one dict — train_model() logs that dict straight to MLflow."""
     baseline_offset = baseline.fit_offset(train_df)
+    metrics: dict[str, float] = {}
 
     print("\n=== baseline (practice time + constant offset) vs neural net ===")
     for name, split_df in [("train", train_df), ("val", val_df), ("test", test_df)]:
@@ -321,6 +419,13 @@ def _report_results(model, device, train_df, val_df, test_df, driver_map, team_m
         print(f"\n{name} ({baseline_result['n_rows']} rows, {baseline_result['n_sessions']} sessions):")
         print(f"  baseline   MAE: {baseline_result['mae_seconds']:.3f}s | pole accuracy: {baseline_result['pole_accuracy']:.1%}")
         print(f"  neural net MAE: {nn_result['mae_seconds']:.3f}s | pole accuracy: {nn_result['pole_accuracy']:.1%}")
+
+        metrics[f"{name}_baseline_mae_s"] = baseline_result["mae_seconds"]
+        metrics[f"{name}_baseline_pole_accuracy"] = baseline_result["pole_accuracy"]
+        metrics[f"{name}_nn_mae_s"] = nn_result["mae_seconds"]
+        metrics[f"{name}_nn_pole_accuracy"] = nn_result["pole_accuracy"]
+
+    return metrics
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/elide/Documents/GitHub/FormulaOne/f1-race-analytics/backend/storage/mlruns/104831287542412937/dcda667e7962430f8cf397570bbf4aa4/artifacts
+end_time: 1787502174526
+entry_point_name: ''
+experiment_id: '104831287542412937'
+lifecycle_stage: active
+run_id: dcda667e7962430f8cf397570bbf4aa4
+run_name: delightful-dog-58
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1787502168248
+status: 3
+tags: []
+user_id: elide

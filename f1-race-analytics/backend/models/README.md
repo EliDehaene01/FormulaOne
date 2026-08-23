@@ -78,12 +78,41 @@ domain-informed formula. Expected for a first pass, not a failure.
 - Widen the practice-compound feature to reflect the compound of the
   driver's actual fastest lap, not just their most-used compound.
 
-## Running this (see repo root README.md's Phase 2 section for full WSL setup)
-
-PyTorch does not import natively on this Windows machine (Application
-Control policy blocks its DLL) — everything here runs inside WSL Ubuntu,
-via a separate venv at `~/.venvs/f1-race-analytics`.
+## Running this
 
 ```
-~/.venvs/f1-race-analytics/bin/python -m backend.models.train
+python -m backend.models.train             # one run with the default hyperparameters
+python -m backend.models.tune               # 50-trial Optuna sweep, retrains + saves the winner
+python -m backend.models.tune --n-trials 20 --no-retrain   # search only, don't touch qualifying_model.pt
 ```
+
+(Older notes here said PyTorch needed WSL on this machine — that's no longer
+true as of this session; it imports natively on plain Windows Python now.)
+
+## MLflow experiment tracking
+
+Every call to `train_model()` — a plain training run, each individual Optuna
+trial, and the final retrain of the winning config — is logged as its own
+MLflow run: every hyperparameter (hidden layer sizes, dropout, learning
+rate, batch size, weight decay, embedding dims), the per-epoch validation
+MAE curve, the final MAE/pole-accuracy for train/val/test (both the model
+and the baseline, for comparison), and — for a run that actually saves a
+checkpoint — the checkpoint file itself as an artifact you can download
+straight from the run's page.
+
+It's entirely local: no Azure resource, no server to run, no account —
+tracking data lives in `backend/storage/mlruns/`, right next to
+`cache.sqlite` and the checkpoint itself.
+
+To browse it:
+
+```
+cd f1-race-analytics
+mlflow ui
+```
+
+Then open the URL it prints (usually `http://127.0.0.1:5000`). A `tune.py`
+sweep shows up as one `hyperparameter_sweep` run with every trial nested
+underneath it (tagged with its Optuna trial number), rather than dozens of
+unrelated runs cluttering the experiment's top-level list — expand it to
+compare trials side by side.

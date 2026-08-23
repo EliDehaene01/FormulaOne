@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/elide/Documents/GitHub/FormulaOne/f1-race-analytics/backend/storage/mlruns/104831287542412937/ed0f1c16221046d9b39da4bfb47d3667/artifacts
+end_time: 1787501883763
+entry_point_name: ''
+experiment_id: '104831287542412937'
+lifecycle_stage: active
+run_id: ed0f1c16221046d9b39da4bfb47d3667
+run_name: hyperparameter_sweep
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1787501867120
+status: 3
+tags: []
+user_id: elide
