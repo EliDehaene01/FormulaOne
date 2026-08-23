@@ -28,6 +28,20 @@ for "fixed-size numeric input -> numeric output" and is the right amount of
 model for ~1,200 training rows. Something like an RNN or Transformer would
 be solving a problem we don't have (sequence order) and would badly overfit
 this little data.
+
+WHY WIDER HIDDEN LAYERS + DROPOUT NOW
+------------------------------------------
+The numeric feature count grew from 17 to 54 (see backend/models/features.py)
+without the training set growing at all — same ~1,200 rows, nearly 4x the
+input width. Two changes respond to that: (1) the default hidden layer
+sizes went from (64, 32) to (128, 64, 32) so the network isn't immediately
+bottlenecking a 70+-dim input through a narrower layer than its own input;
+(2) an optional Dropout layer after each hidden activation, since more
+input features on the same amount of data raises overfitting risk — dropout
+randomly zeroes a fraction of activations during training, which forces the
+network to not over-rely on any single feature. Both are still just
+defaults: backend/models/tune.py searches over hidden sizes and dropout
+rather than trusting these numbers blindly.
 """
 
 import torch
@@ -49,7 +63,8 @@ class QualifyingLapTimePredictor(nn.Module):
         driver_embed_dim: int = 8,
         team_embed_dim: int = 4,
         circuit_embed_dim: int = 6,
-        hidden_sizes: tuple[int, ...] = (64, 32),
+        hidden_sizes: tuple[int, ...] = (128, 64, 32),
+        dropout: float = 0.1,
     ):
         super().__init__()  # required boilerplate: lets nn.Module wire up parameter tracking, .to(device), etc.
 
@@ -80,6 +95,14 @@ class QualifyingLapTimePredictor(nn.Module):
         for hidden_dim in hidden_sizes:
             layers.append(nn.Linear(prev_dim, hidden_dim))
             layers.append(nn.ReLU())
+            if dropout > 0:
+                # Dropout(p): during training, zeroes each activation with
+                # probability p (independently, every forward pass) and
+                # rescales the rest so the expected sum is unchanged. Off
+                # automatically in eval mode (model.eval()) — train.py
+                # already toggles that correctly for validation/inference,
+                # so no extra wiring needed here for it to behave.
+                layers.append(nn.Dropout(dropout))
             prev_dim = hidden_dim
         layers.append(nn.Linear(prev_dim, 1))  # final layer: hidden features -> a single predicted lap time
         self.mlp = nn.Sequential(*layers)

@@ -5,3 +5,5 @@ openai
 python-dotenv
 fastapi
 uvicorn
+optuna
+chromadb

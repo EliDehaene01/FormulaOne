@@ -33,6 +33,74 @@ def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
+def search_knowledge_base(query: str, k: int = 3) -> list[dict]:
+    """
+    Semantic search over Pit Wall's F1 knowledge base (glossary terms, tyre
+    strategy concepts, regulations/race control rules, circuit guides) — for
+    CONCEPTUAL/rules questions, never race data (which the other tools own).
+    """
+    from backend.rag.store import search_knowledge_base as _search
+
+    return _search(query, k)
+
+
+def get_meetings(year: int | None = None) -> list[dict]:
+    """Race weekends (Grand Prix or pre-season testing) — name, location, circuit, dates. Use find_sessions instead when you need to resolve a specific race into a session_key; this is for browsing weekends themselves."""
+    conn = _connect()
+    query = "SELECT meeting_key, meeting_name, meeting_official_name, location, country_name, circuit_short_name, year, date_start FROM meetings"
+    params: list = []
+    if year is not None:
+        query += " WHERE year = ?"
+        params.append(year)
+    query += " ORDER BY date_start"
+    df = pd.read_sql(query, conn, params=params)
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_car_telemetry(session_key: int, driver_number: int, lap_number: int) -> dict:
+    """
+    Speed/throttle/brake/RPM/gear/DRS telemetry for one driver's one lap,
+    summarized (not the raw ~3.7Hz samples, which would burn a lot of
+    tokens for one lap). Same "live, bounded to one lap" approach as
+    get_car_location — see that function's docstring for why this isn't
+    bulk-cached.
+    """
+    from backend.data.openf1_client import get_car_data
+
+    conn = _connect()
+    laps = pd.read_sql(
+        "SELECT date_start, lap_duration FROM laps WHERE session_key = ? AND driver_number = ? AND lap_number = ?",
+        conn,
+        params=[session_key, driver_number, lap_number],
+    )
+    conn.close()
+    if laps.empty:
+        return {"error": f"no lap {lap_number} recorded for driver {driver_number} in session {session_key}"}
+
+    start = pd.Timestamp(laps.iloc[0]["date_start"])
+    duration = laps.iloc[0]["lap_duration"]
+    seconds = float(duration) if pd.notna(duration) else 180.0
+    end = start + pd.Timedelta(seconds=seconds)
+
+    samples = get_car_data(session_key, driver_number, start.isoformat(), end.isoformat())
+    if not samples:
+        return {"session_key": session_key, "driver_number": driver_number, "lap_number": lap_number, "note": "no telemetry samples available for this lap"}
+
+    df = pd.DataFrame(samples)
+    return {
+        "session_key": session_key,
+        "driver_number": driver_number,
+        "lap_number": lap_number,
+        "sample_count": len(df),
+        "top_speed_kph": float(df["speed"].max()) if "speed" in df else None,
+        "avg_speed_kph": round(float(df["speed"].mean()), 1) if "speed" in df else None,
+        "avg_throttle_pct": round(float(df["throttle"].mean()), 1) if "throttle" in df else None,
+        "time_braking_pct": round(float((df["brake"] > 0).mean() * 100), 1) if "brake" in df else None,
+        "drs_active_pct": round(float((df["drs"] > 0).mean() * 100), 1) if "drs" in df else None,
+    }
+
+
 def find_sessions(
     year: int | None = None,
     meeting_name: str | None = None,
@@ -193,6 +261,41 @@ def get_car_location(session_key: int, driver_number: int, lap_number: int) -> l
     return [{"x": p["x"], "y": p["y"]} for p in points]
 
 
+def get_car_telemetry_series(session_key: int, driver_number: int, lap_number: int) -> list[dict]:
+    """
+    Raw speed/throttle/brake samples for one lap — chart-only helper (not an
+    LLM tool; get_car_telemetry's summary is what the model gets). Same
+    live/bounded-per-lap approach as get_car_location.
+    """
+    from backend.data.openf1_client import get_car_data
+
+    conn = _connect()
+    laps = pd.read_sql(
+        "SELECT date_start, lap_duration FROM laps WHERE session_key = ? AND driver_number = ? AND lap_number = ?",
+        conn,
+        params=[session_key, driver_number, lap_number],
+    )
+    conn.close()
+    if laps.empty:
+        return []
+
+    start = pd.Timestamp(laps.iloc[0]["date_start"])
+    duration = laps.iloc[0]["lap_duration"]
+    seconds = float(duration) if pd.notna(duration) else 180.0
+    end = start + pd.Timedelta(seconds=seconds)
+
+    samples = get_car_data(session_key, driver_number, start.isoformat(), end.isoformat())
+    return [
+        {
+            "date": s.get("date"),
+            "speed": s.get("speed"),
+            "throttle": s.get("throttle"),
+            "brake": s.get("brake"),
+        }
+        for s in samples
+    ]
+
+
 def get_weather(session_key: int) -> dict:
     """
     Summarized, not raw — a session can have hundreds of individual weather
@@ -266,6 +369,117 @@ def get_race_control_messages(session_key: int) -> list[dict]:
     conn = _connect()
     df = pd.read_sql(
         "SELECT date, category, message, flag, lap_number, driver_number FROM race_control WHERE session_key = ? ORDER BY date",
+        conn,
+        params=[session_key],
+    )
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_pit_stops(session_key: int, driver_number: int | None = None) -> list[dict]:
+    """Pit lane visits: which lap, and how long the car spent in the pit lane / stationary."""
+    conn = _connect()
+    # OpenF1 renamed pit_duration -> lane_duration at some point but kept
+    # pit_duration as a deprecated alias with the same value — select *
+    # and coalesce rather than hardcode one name that might not be the
+    # column this particular cache actually has.
+    df = pd.read_sql("SELECT * FROM pit WHERE session_key = ?", conn, params=[session_key])
+    conn.close()
+    if df.empty:
+        return []
+    if driver_number is not None:
+        df = df[df["driver_number"] == driver_number]
+    df["pit_lane_duration_s"] = df["pit_duration"] if "pit_duration" in df.columns else df.get("lane_duration")
+    if "lane_duration" in df.columns:
+        df["pit_lane_duration_s"] = df["pit_lane_duration_s"].fillna(df["lane_duration"])
+    cols = [c for c in ["driver_number", "lap_number", "pit_lane_duration_s", "stop_duration"] if c in df.columns or c == "pit_lane_duration_s"]
+    return df.sort_values(["driver_number", "lap_number"])[cols].to_dict("records")
+
+
+def get_intervals(session_key: int, driver_number: int | None = None) -> list[dict]:
+    """Real-time gap to the driver ahead and to the race leader, over time (Race/Sprint sessions only). Prefer passing driver_number — unfiltered can be a few hundred rows."""
+    conn = _connect()
+    query = "SELECT driver_number, date, gap_to_leader, interval FROM intervals WHERE session_key = ?"
+    params: list = [session_key]
+    if driver_number is not None:
+        query += " AND driver_number = ?"
+        params.append(driver_number)
+    query += " ORDER BY date"
+    df = pd.read_sql(query, conn, params=params)
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_overtakes(session_key: int) -> list[dict]:
+    """On-track and pit-related position exchanges between two drivers, in chronological order."""
+    conn = _connect()
+    df = pd.read_sql(
+        "SELECT date, overtaking_driver_number, overtaken_driver_number, position FROM overtakes WHERE session_key = ? ORDER BY date",
+        conn,
+        params=[session_key],
+    )
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_team_radio(session_key: int, driver_number: int | None = None) -> list[dict]:
+    """Driver-to-pit-wall radio message timestamps + recording URLs. The model can't listen to the audio — only note when a message happened and to/from whom."""
+    conn = _connect()
+    query = "SELECT driver_number, date, recording_url FROM team_radio WHERE session_key = ?"
+    params: list = [session_key]
+    if driver_number is not None:
+        query += " AND driver_number = ?"
+        params.append(driver_number)
+    query += " ORDER BY date"
+    df = pd.read_sql(query, conn, params=params)
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_session_result(session_key: int) -> list[dict]:
+    """Final classification: position, race/best-lap duration, gap to leader, DNF/DNS/DSQ flags."""
+    conn = _connect()
+    df = pd.read_sql(
+        "SELECT driver_number, position, duration, gap_to_leader, number_of_laps, dnf, dns, dsq "
+        "FROM session_result WHERE session_key = ? ORDER BY position",
+        conn,
+        params=[session_key],
+    )
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_starting_grid(session_key: int) -> list[dict]:
+    """Starting grid order for a Race/Sprint session, with the qualifying lap time that earned each slot."""
+    conn = _connect()
+    df = pd.read_sql(
+        "SELECT driver_number, position, lap_duration FROM starting_grid WHERE session_key = ? ORDER BY position",
+        conn,
+        params=[session_key],
+    )
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_driver_championship_standings(session_key: int) -> list[dict]:
+    """Drivers'-championship standing before and after this session."""
+    conn = _connect()
+    df = pd.read_sql(
+        "SELECT driver_number, position_start, position_current, points_start, points_current "
+        "FROM championship_drivers WHERE session_key = ? ORDER BY position_current",
+        conn,
+        params=[session_key],
+    )
+    conn.close()
+    return df.to_dict("records")
+
+
+def get_team_championship_standings(session_key: int) -> list[dict]:
+    """Constructors'-championship standing before and after this session."""
+    conn = _connect()
+    df = pd.read_sql(
+        "SELECT team_name, position_start, position_current, points_start, points_current "
+        "FROM championship_teams WHERE session_key = ? ORDER BY position_current",
         conn,
         params=[session_key],
     )
@@ -356,6 +570,11 @@ def predict_qualifying_pace(session_key: int) -> dict:
         num_teams=len(checkpoint["team_map"]),
         num_circuits=len(checkpoint["circuit_map"]),
         num_numeric_features=len(checkpoint["numeric_feature_columns"]),
+        # Must match training exactly or load_state_dict below fails on a
+        # shape mismatch — tune.py can pick different hidden_sizes per run,
+        # so this can't rely on the constructor's own default anymore.
+        hidden_sizes=tuple(checkpoint.get("hidden_sizes", (128, 64, 32))),
+        dropout=checkpoint.get("dropout", 0.1),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -388,6 +607,71 @@ def predict_qualifying_pace(session_key: int) -> dict:
 
 
 TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge_base",
+            "description": (
+                "Semantic search over Pit Wall's F1 knowledge base: glossary terms, tyre strategy concepts, "
+                "regulations & race control rules, and circuit characteristics. Use this ONLY for conceptual/rules "
+                "questions in plain language (e.g. \"what's an undercut\", \"why can't you overtake under blue "
+                "flags\", \"why is Monaco hard to pass at\") — never for race data like lap times, positions, "
+                "standings, or session results, which always come from the data tools instead. Don't call this on "
+                "every message, only when the question genuinely needs conceptual grounding."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The concept or rule being asked about, in plain language."},
+                    "k": {"type": "integer", "description": "Number of chunks to retrieve (default 3)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_meetings",
+            "description": "Race weekends (Grand Prix or pre-season testing) — name, location, circuit, dates. Use find_sessions instead to resolve a specific race into a session_key.",
+            "parameters": {
+                "type": "object",
+                "properties": {"year": {"type": "integer"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_car_location",
+            "description": "x/y track coordinates for one driver's one lap — useful for describing the racing line or where on track something happened.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_key": {"type": "integer"},
+                    "driver_number": {"type": "integer"},
+                    "lap_number": {"type": "integer"},
+                },
+                "required": ["session_key", "driver_number", "lap_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_car_telemetry",
+            "description": "Summarized speed/throttle/brake/DRS telemetry for one driver's one lap (top/avg speed, % time braking, % DRS active).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_key": {"type": "integer"},
+                    "driver_number": {"type": "integer"},
+                    "lap_number": {"type": "integer"},
+                },
+                "required": ["session_key", "driver_number", "lap_number"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -503,6 +787,102 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_pit_stops",
+            "description": "Pit lane visits for a session: which lap, and how long the car spent in the pit lane / stationary.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}, "driver_number": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_intervals",
+            "description": "Real-time gap to the driver ahead and to the race leader over time (Race/Sprint sessions only). Pass driver_number for a full race — unfiltered can be a few hundred rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}, "driver_number": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_overtakes",
+            "description": "On-track and pit-related position exchanges between two drivers, in chronological order.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_team_radio",
+            "description": "Driver-to-pit-wall radio message timestamps for a session. You cannot listen to the audio — only report when a message happened and who it involved.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}, "driver_number": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_session_result",
+            "description": "Final classification for a session: position, race/best-lap duration, gap to leader, DNF/DNS/DSQ flags.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_starting_grid",
+            "description": "Starting grid order for a Race/Sprint session, with the qualifying lap time that earned each slot.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_driver_championship_standings",
+            "description": "Drivers'-championship standing (position + points) before and after a session.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_team_championship_standings",
+            "description": "Constructors'-championship standing (position + points) before and after a session.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_key": {"type": "integer"}},
+                "required": ["session_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "predict_qualifying_pace",
             "description": "Run the trained model's qualifying pace prediction for a session (only works for sessions with cached practice+qualifying data — good for 'what did the model predict for this race', not yet for genuinely future races). Always present the result as an uncertain estimate, never as fact.",
             "parameters": {
@@ -515,6 +895,10 @@ TOOL_SCHEMAS = [
 ]
 
 TOOL_DISPATCH = {
+    "search_knowledge_base": search_knowledge_base,
+    "get_meetings": get_meetings,
+    "get_car_location": get_car_location,
+    "get_car_telemetry": get_car_telemetry,
     "find_sessions": find_sessions,
     "get_drivers": get_drivers,
     "get_lap_times": get_lap_times,
@@ -522,6 +906,14 @@ TOOL_DISPATCH = {
     "get_tire_strategy": get_tire_strategy,
     "get_weather": get_weather,
     "get_race_control_messages": get_race_control_messages,
+    "get_pit_stops": get_pit_stops,
+    "get_intervals": get_intervals,
+    "get_overtakes": get_overtakes,
+    "get_team_radio": get_team_radio,
+    "get_session_result": get_session_result,
+    "get_starting_grid": get_starting_grid,
+    "get_driver_championship_standings": get_driver_championship_standings,
+    "get_team_championship_standings": get_team_championship_standings,
     "get_driver_season_summary": get_driver_season_summary,
     "predict_qualifying_pace": predict_qualifying_pace,
 }

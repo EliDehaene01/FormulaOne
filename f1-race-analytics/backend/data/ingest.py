@@ -60,6 +60,16 @@ def ingest_session(conn, session_key: int) -> None:
         "weather": lambda sk=session_key: client.get_weather(session_key=sk),
         "race_control": lambda sk=session_key: client.get_race_control(session_key=sk),
         "drivers": lambda sk=session_key: client.get_drivers(session_key=sk),
+        "pit": lambda sk=session_key: client.get_pit(session_key=sk),
+        "intervals": lambda sk=session_key: client.get_intervals(session_key=sk),
+        "overtakes": lambda sk=session_key: client.get_overtakes(session_key=sk),
+        "team_radio": lambda sk=session_key: client.get_team_radio(session_key=sk),
+        "session_result": lambda sk=session_key: client.get_session_result(session_key=sk),
+        "starting_grid": lambda sk=session_key: client.get_starting_grid(session_key=sk),
+        "championship_drivers": lambda sk=session_key: client.get_championship_drivers(session_key=sk),
+        "championship_teams": lambda sk=session_key: client.get_championship_teams(session_key=sk),
+        # car_data is deliberately excluded here — see get_car_data's docstring
+        # in openf1_client.py (~3.7Hz telemetry, not bulk-cache-sized).
     }
     for table, fetch_fn in endpoints.items():
         cache.get_or_fetch(conn, table, f"session_{session_key}", fetch_fn)

@@ -36,6 +36,11 @@ app.add_middleware(
 )
 
 
+@app.get("/api/meetings")
+def list_meetings(year: int | None = None):
+    return tools.get_meetings(year)
+
+
 @app.get("/api/races")
 def list_races(
     year: int | None = None,
@@ -91,6 +96,46 @@ def race_drivers(session_key: int):
     return tools.get_drivers(session_key)
 
 
+@app.get("/api/races/{session_key}/pit-stops")
+def race_pit_stops(session_key: int, driver_number: int | None = None):
+    return tools.get_pit_stops(session_key, driver_number)
+
+
+@app.get("/api/races/{session_key}/intervals")
+def race_intervals(session_key: int, driver_number: int | None = None):
+    return tools.get_intervals(session_key, driver_number)
+
+
+@app.get("/api/races/{session_key}/overtakes")
+def race_overtakes(session_key: int):
+    return tools.get_overtakes(session_key)
+
+
+@app.get("/api/races/{session_key}/team-radio")
+def race_team_radio(session_key: int, driver_number: int | None = None):
+    return tools.get_team_radio(session_key, driver_number)
+
+
+@app.get("/api/races/{session_key}/session-result")
+def race_session_result(session_key: int):
+    return tools.get_session_result(session_key)
+
+
+@app.get("/api/races/{session_key}/starting-grid")
+def race_starting_grid(session_key: int):
+    return tools.get_starting_grid(session_key)
+
+
+@app.get("/api/races/{session_key}/standings/drivers")
+def race_driver_standings(session_key: int):
+    return tools.get_driver_championship_standings(session_key)
+
+
+@app.get("/api/races/{session_key}/standings/teams")
+def race_team_standings(session_key: int):
+    return tools.get_team_championship_standings(session_key)
+
+
 @app.get("/api/races/{session_key}/track-layout")
 def race_track_layout(session_key: int, driver_number: int, lap_number: int):
     try:
@@ -101,6 +146,14 @@ def race_track_layout(session_key: int, driver_number: int, lap_number: int):
         # elsewhere in this app, it needs a paid/authenticated OpenF1 tier
         # we don't have. Surface that plainly instead of a generic 500.
         raise HTTPException(status_code=502, detail=f"OpenF1 location data unavailable: {exc}") from exc
+
+
+@app.get("/api/races/{session_key}/car-telemetry")
+def race_car_telemetry(session_key: int, driver_number: int, lap_number: int):
+    try:
+        return tools.get_car_telemetry_series(session_key, driver_number, lap_number)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"OpenF1 car_data unavailable: {exc}") from exc
 
 
 @app.get("/api/races/{session_key}/prediction")

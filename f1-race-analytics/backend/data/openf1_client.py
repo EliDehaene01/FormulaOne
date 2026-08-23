@@ -128,3 +128,59 @@ def get_race_control(session_key: int) -> list[dict]:
 def get_drivers(session_key: int) -> list[dict]:
     """The driver/team lineup for this specific session (teams change year to year, so this is per-session, not global)."""
     return _get("drivers", session_key=session_key)
+
+
+def get_pit(session_key: int) -> list[dict]:
+    """Pit lane visits: which lap, and how long the car spent in the pit lane."""
+    return _get("pit", session_key=session_key)
+
+
+def get_intervals(session_key: int) -> list[dict]:
+    """Real-time gap to the driver ahead and to the race leader (Race/Sprint sessions only)."""
+    return _get("intervals", session_key=session_key)
+
+
+def get_overtakes(session_key: int) -> list[dict]:
+    """On-track and pit-related position exchanges between two drivers."""
+    return _get("overtakes", session_key=session_key)
+
+
+def get_team_radio(session_key: int) -> list[dict]:
+    """Metadata + recording URLs for driver-to-pit-wall radio messages."""
+    return _get("team_radio", session_key=session_key)
+
+
+def get_session_result(session_key: int) -> list[dict]:
+    """Final classification (position, points, gap, status) at the end of the session."""
+    return _get("session_result", session_key=session_key)
+
+
+def get_starting_grid(session_key: int) -> list[dict]:
+    """Starting grid order for a Race/Sprint session."""
+    return _get("starting_grid", session_key=session_key)
+
+
+def get_championship_drivers(session_key: int) -> list[dict]:
+    """Running drivers'-championship standings as of this session."""
+    return _get("championship_drivers", session_key=session_key)
+
+
+def get_championship_teams(session_key: int) -> list[dict]:
+    """Running constructors'-championship standings as of this session."""
+    return _get("championship_teams", session_key=session_key)
+
+
+def get_car_data(session_key: int, driver_number: int, date_start: str, date_end: str) -> list[dict]:
+    """
+    Per-car telemetry (speed, throttle, brake, RPM, gear, DRS) at ~3.7Hz.
+
+    Same deal as get_location: NOT bulk-cached (a whole session for every
+    driver would be hundreds of millions of rows across the existing 378
+    cached sessions) — called live, one driver/one time-window at a time.
+    """
+    return _get(
+        "car_data",
+        session_key=session_key,
+        driver_number=driver_number,
+        **{"date>=": date_start, "date<=": date_end},
+    )

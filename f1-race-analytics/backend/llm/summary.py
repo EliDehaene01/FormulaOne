@@ -5,7 +5,7 @@ recap, grounded strictly in what we hand it.
 
 WHY NOT THE TOOL-CALLING LOOP FROM client.py
 ------------------------------------------------
-Tool calling (Phase 3) exists because in open-ended chat we don't know in
+Tool calling exists because in open-ended chat we don't know in
 advance what the user will ask, so the model has to decide what data it
 needs and request it, possibly over several round trips. A race summary is
 the opposite: a FIXED task — we already know exactly what a good recap

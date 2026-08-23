@@ -90,6 +90,23 @@ def get_or_fetch(conn: sqlite3.Connection, table: str, cache_key: str, fetch_fn)
     # any list/dict cell has to become a JSON string before we can insert it.
     df = df.map(lambda v: json.dumps(v) if isinstance(v, (list, dict)) else v)
 
+    # A table can already exist with FEWER columns than this batch has —
+    # e.g. the first session ever queried for an endpoint had no rows (see
+    # the empty-result branch above, which creates a bare _cache_key-only
+    # table), or an OpenF1 endpoint's schema genuinely grew a new field
+    # between older and newer sessions (confirmed in practice: `pit`'s
+    # stop_duration is only populated from the 2024 US GP onward). Add
+    # whatever's missing before inserting, or to_sql's append raises
+    # "table X has no column named Y".
+    table_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+    if table_exists:
+        existing_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for column in df.columns:
+            if column not in existing_columns:
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN "{column}"')
+    # else: no widening needed — to_sql below creates the table fresh from
+    # this DataFrame's own columns, the same as it always has.
+
     df.to_sql(table, conn, if_exists="append", index=False)
     conn.execute(
         "INSERT INTO _cache_log (table_name, cache_key) VALUES (?, ?)",

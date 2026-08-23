@@ -6,6 +6,17 @@ baseline. Run with:
 
 Saves the trained model (+ everything needed to run inference on it later)
 to backend/storage/qualifying_model.pt.
+
+HYPERPARAMETERS ARE FUNCTION ARGUMENTS, NOT JUST MODULE CONSTANTS
+----------------------------------------------------------------------
+train_model() takes hidden_sizes/dropout/learning_rate/batch_size/
+weight_decay/max_epochs/early_stop_patience as keyword arguments (defaulting
+to the module constants below, so `python -m backend.models.train` with no
+arguments behaves exactly as before). This is what lets
+backend/models/tune.py reuse this exact training loop for every Optuna
+trial instead of maintaining a second copy of it — one training
+implementation, called either with fixed defaults (this script) or
+trial-suggested values (tune.py).
 """
 
 import sqlite3
@@ -108,7 +119,23 @@ def _to_tensors(df: pd.DataFrame, driver_map: dict, team_map: dict, circuit_map:
     return driver_idx, team_idx, circuit_idx, numeric_tensor, target
 
 
-def train_model() -> None:
+def train_model(
+    hidden_sizes: tuple[int, ...] = (128, 64, 32),
+    dropout: float = 0.1,
+    learning_rate: float = LEARNING_RATE,
+    batch_size: int = BATCH_SIZE,
+    weight_decay: float = 0.0,
+    max_epochs: int = MAX_EPOCHS,
+    early_stop_patience: int = EARLY_STOP_PATIENCE,
+    save_checkpoint: bool = True,
+) -> float:
+    """
+    Returns the best validation MAE (seconds) achieved — the value
+    backend/models/tune.py's Optuna objective optimizes. save_checkpoint
+    exists so a tuning trial can train and be scored WITHOUT overwriting
+    qualifying_model.pt on every single trial; only the final, winning
+    hyperparameter set (via tune.py's retrain_best()) sets it True.
+    """
     conn = sqlite3.connect(DB_PATH)
     df = build_feature_table(conn)
     conn.close()
@@ -145,10 +172,15 @@ def train_model() -> None:
     # every epoch — a real regularization technique would resample it per
     # epoch for more robustness; fine for a first baseline.)
     train_driver_idx, train_team_idx, train_circuit_idx, train_numeric, train_target = train_tensors
-    unknown_dropout_p = 0.1
+    # Unrelated to the `dropout` parameter above (that's regular NN
+    # regularization on hidden activations) — this is a fixed 10% chance of
+    # relabeling a category as "<UNKNOWN>" during training, always at this
+    # rate regardless of tuning, so the embedding's unknown-category row
+    # gets real gradient signal (see the comment below for why that matters).
+    unknown_category_relabel_p = 0.1
     generator = torch.Generator().manual_seed(0)
     for idx_tensor in (train_driver_idx, train_team_idx, train_circuit_idx):
-        drop_mask = torch.rand(idx_tensor.shape, generator=generator) < unknown_dropout_p
+        drop_mask = torch.rand(idx_tensor.shape, generator=generator) < unknown_category_relabel_p
         idx_tensor[drop_mask] = 0
     train_tensors = (train_driver_idx, train_team_idx, train_circuit_idx, train_numeric, train_target)
 
@@ -164,6 +196,8 @@ def train_model() -> None:
         num_teams=len(team_map),
         num_circuits=len(circuit_map),
         num_numeric_features=len(NUMERIC_FEATURE_COLUMNS),
+        hidden_sizes=hidden_sizes,
+        dropout=dropout,
     ).to(device)  # moves every parameter tensor onto the chosen device; must match where the input tensors live
 
     # DataLoader batches + shuffles the training set each epoch. Shuffling
@@ -171,7 +205,7 @@ def train_model() -> None:
     # chronological order every epoch and could pick up on spurious
     # patterns from that ordering rather than the features themselves.
     train_dataset = torch.utils.data.TensorDataset(*train_tensors)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     # MSELoss (mean squared error) is what we optimize during training —
     # squaring the error means one 5-second miss hurts the loss as much as
@@ -187,14 +221,16 @@ def train_model() -> None:
     # Adam adapts its own per-parameter learning rate as it goes, which
     # makes it a robust default that rarely needs tuning — a safe choice
     # for a first baseline rather than plain SGD, which is more sensitive
-    # to the learning rate you pick.
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    # to the learning rate you pick. weight_decay adds L2 regularization
+    # (shrinks weights toward zero each step) — another overfitting knob
+    # alongside dropout; 0.0 (off) unless tune.py finds a better value.
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     best_val_mae = float("inf")
     best_state_dict = None
     epochs_without_improvement = 0
 
-    for epoch in range(MAX_EPOCHS):
+    for epoch in range(max_epochs):
         model.train()  # switches on training-mode behavior (irrelevant for this architecture since we have no
         # Dropout/BatchNorm layers, but it's the standard first line of every training loop, so it's here for real ones later)
         for driver_idx, team_idx, circuit_idx, numeric, target in train_loader:
@@ -235,8 +271,8 @@ def train_model() -> None:
         # wasn't trained on. Stopping once val MAE plateaus, and keeping the
         # best weights we saw rather than the final ones, avoids shipping an
         # overfit snapshot just because it happened to be the last epoch.
-        if epochs_without_improvement >= EARLY_STOP_PATIENCE:
-            print(f"stopped early at epoch {epoch} (no val improvement in {EARLY_STOP_PATIENCE} epochs)")
+        if epochs_without_improvement >= early_stop_patience:
+            print(f"stopped early at epoch {epoch} (no val improvement in {early_stop_patience} epochs)")
             break
 
     model.load_state_dict(best_state_dict)  # restore the best-seen weights, discarding any overfitting since then
@@ -244,19 +280,24 @@ def train_model() -> None:
 
     _report_results(model, device, train_df, val_df, test_df, driver_map, team_map, circuit_map, numeric_mean, numeric_std)
 
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "driver_map": driver_map,
-            "team_map": team_map,
-            "circuit_map": circuit_map,
-            "numeric_feature_columns": NUMERIC_FEATURE_COLUMNS,
-            "numeric_mean": numeric_mean,
-            "numeric_std": numeric_std,
-        },
-        CHECKPOINT_PATH,
-    )
-    print(f"\nSaved checkpoint to {CHECKPOINT_PATH}")
+    if save_checkpoint:
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "driver_map": driver_map,
+                "team_map": team_map,
+                "circuit_map": circuit_map,
+                "numeric_feature_columns": NUMERIC_FEATURE_COLUMNS,
+                "numeric_mean": numeric_mean,
+                "numeric_std": numeric_std,
+                "hidden_sizes": hidden_sizes,
+                "dropout": dropout,
+            },
+            CHECKPOINT_PATH,
+        )
+        print(f"\nSaved checkpoint to {CHECKPOINT_PATH}")
+
+    return best_val_mae
 
 
 def _nn_predict(model, device, df, driver_map, team_map, circuit_map, numeric_mean, numeric_std) -> pd.Series:
