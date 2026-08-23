@@ -141,10 +141,10 @@ def race_track_layout(session_key: int, driver_number: int, lap_number: int):
     try:
         return tools.get_car_location(session_key, driver_number, lap_number)
     except Exception as exc:
-        # OpenF1's /location endpoint returns 401 for this project's
-        # unauthenticated access — unlike every other endpoint used
-        # elsewhere in this app, it needs a paid/authenticated OpenF1 tier
-        # we don't have. Surface that plainly instead of a generic 500.
+        # Genuinely rare now that the date>=/date<= query-encoding bug is
+        # fixed (see openf1_client.py's _get docstring) — OpenF1 just
+        # doesn't have location data for every lap ever run. Surface that
+        # plainly instead of a generic 500.
         raise HTTPException(status_code=502, detail=f"OpenF1 location data unavailable: {exc}") from exc
 
 

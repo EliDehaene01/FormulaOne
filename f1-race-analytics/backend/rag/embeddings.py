@@ -6,10 +6,13 @@ its own, so it gets its own minimal client rather than reusing chat's.
 """
 
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import AzureOpenAI
+
+from backend.observability import log_call
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -29,7 +32,16 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     client = _get_client()
+    start = time.perf_counter()
     response = client.embeddings.create(model=EMBEDDING_DEPLOYMENT, input=texts)
+    log_call(
+        call_type="embedding",
+        deployment=EMBEDDING_DEPLOYMENT,
+        input_tokens=response.usage.prompt_tokens if response.usage else 0,
+        output_tokens=0,
+        latency_ms=(time.perf_counter() - start) * 1000,
+        caller="rag.embeddings.embed_texts",
+    )
     return [item.embedding for item in response.data]
 
 

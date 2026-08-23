@@ -12,6 +12,7 @@ caching strategy later without touching this file.
 """
 
 import time
+from urllib.parse import quote
 
 import requests
 
@@ -34,12 +35,36 @@ def _get(endpoint: str, **params) -> list[dict]:
 
     None values are dropped so callers can pass optional filters without
     each wrapper function needing its own "if X is not None" branch.
+
+    BUILT BY HAND, INTO THE URL DIRECTLY — NOT VIA requests(params=...)
+    ----------------------------------------------------------------------
+    get_location/get_car_data pass keys like "date>=" — OpenF1's literal
+    syntax for a range filter (see their docs; there's no separate operator
+    parameter). `requests(params=...)` percent-encodes '>'/'<' no matter
+    whether you hand it a dict (which encodes the KEY, turning "date>=" into
+    "date%3E=") or a pre-built string (which requests re-encodes anyway) —
+    either way OpenF1 stops recognizing the operator and silently answers
+    "no results" instead of erroring, which is why every location/telemetry
+    call looked like it was hitting an empty/gated endpoint. Appending an
+    already-built query string straight onto the URL, bypassing `params=`
+    entirely, is what actually keeps the operator characters literal on the
+    wire.
     """
-    query = {k: v for k, v in params.items() if v is not None}
+    parts = []
+    for key, value in params.items():
+        if value is None:
+            continue
+        # Operator keys ("date>=", "date<=") already end in "=" themselves —
+        # a plain key like "session_key" doesn't, and still needs one added.
+        separator = "" if key.endswith(("<=", ">=")) else "="
+        parts.append(f"{key}{separator}{quote(str(value), safe='')}")
+    url = f"{BASE_URL}/{endpoint}"
+    if parts:
+        url = f"{url}?{'&'.join(parts)}"
     backoff = INITIAL_BACKOFF_SECONDS
 
     for attempt in range(MAX_RETRIES + 1):
-        response = requests.get(f"{BASE_URL}/{endpoint}", params=query, timeout=30)
+        response = requests.get(url, timeout=30)
 
         if response.status_code == 404:
             # Seen in practice: some sessions have no data published yet for
@@ -50,7 +75,22 @@ def _get(endpoint: str, **params) -> list[dict]:
             return []
 
         if response.status_code != 429:
-            response.raise_for_status()  # turn other HTTP errors into a Python exception now, not a confusing KeyError later
+            try:
+                response.raise_for_status()  # turn other HTTP errors into a Python exception now, not a confusing KeyError later
+            except requests.HTTPError as exc:
+                # OpenF1 puts the actually useful explanation in the JSON
+                # body (e.g. "Live F1 session in progress. Global API access
+                # ... is restricted to authenticated users until the session
+                # ends" — a real, temporary condition, not a bug, but
+                # `raise_for_status()`'s default message discards it and
+                # just says "401 Client Error: Unauthorized"). Surface it
+                # instead, since callers all the way up to the UI want to
+                # know THIS reason specifically, not a generic failure.
+                try:
+                    detail = response.json().get("detail")
+                except Exception:
+                    detail = None
+                raise requests.HTTPError(detail or str(exc), response=response) from exc
             return response.json()
 
         if attempt == MAX_RETRIES:

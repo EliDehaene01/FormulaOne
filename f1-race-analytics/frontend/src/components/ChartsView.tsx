@@ -13,6 +13,7 @@ import { TrackLayoutChart } from "@/components/charts/TrackLayoutChart"
 import { WeatherChart } from "@/components/charts/WeatherChart"
 import { DriverFilter } from "@/components/DriverFilter"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
   fetchDriverLapStats,
   fetchDriverStandings,
@@ -32,6 +33,7 @@ import {
   fetchTeamStandings,
   fetchWeatherTimeseries,
   type ChampionshipStanding,
+  type Driver,
   type Meeting,
   type Overtake,
   type PitStop,
@@ -42,12 +44,37 @@ import {
   type TeamRadioMessage,
 } from "@/lib/api"
 
+// One driver, alphabetically by default — used by the tables below that are
+// scoped to a single driver rather than filtered by the page-level picker
+// (overtakes, pit stops, team radio: all can get long for a full field, so
+// these show one driver at a time instead of everyone-minus-a-filter).
+function DriverDropdown({ drivers, value, onChange }: { drivers: Driver[]; value: number | null; onChange: (driverNumber: number) => void }) {
+  const alphabetical = useMemo(() => [...drivers].sort((a, b) => a.full_name.localeCompare(b.full_name)), [drivers])
+  return (
+    <Select value={value != null ? String(value) : undefined} onValueChange={(v) => onChange(Number(v))}>
+      <SelectTrigger className="w-48">
+        <SelectValue placeholder="Driver" />
+      </SelectTrigger>
+      <SelectContent>
+        {alphabetical.map((d) => (
+          <SelectItem key={d.driver_number} value={String(d.driver_number)}>
+            {d.full_name}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
 // Separate from SummaryView on purpose: this hits the plain data endpoints
 // directly (fast, free), not build_race_summary (which makes a real LLM
 // call every time it's requested). Lets you browse charts for any race
 // without spending API tokens just to look at a graph.
 export function ChartsView({ sessionKey }: { sessionKey: number }) {
   const [selectedDrivers, setSelectedDrivers] = useState<Set<number> | null>(null)
+  const [overtakesDriver, setOvertakesDriver] = useState<number | null>(null)
+  const [pitStopsDriver, setPitStopsDriver] = useState<number | null>(null)
+  const [teamRadioDriver, setTeamRadioDriver] = useState<number | null>(null)
 
   const drivers = useQuery({ queryKey: ["drivers", sessionKey], queryFn: () => fetchDrivers(sessionKey) })
   const laps = useQuery({ queryKey: ["laps", sessionKey], queryFn: () => fetchLapTimeDeltas(sessionKey) })
@@ -75,6 +102,10 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
   const driverList = drivers.data ?? []
   const nameMap = useMemo(() => new Map(driverList.map((d) => [d.driver_number, d])), [driverList])
   const nameOf = (n: number) => nameMap.get(n)?.full_name ?? `#${n}`
+  const alphabeticalDrivers = useMemo(() => [...driverList].sort((a, b) => a.full_name.localeCompare(b.full_name)), [driverList])
+  const effectiveOvertakesDriver = overtakesDriver ?? alphabeticalDrivers[0]?.driver_number ?? null
+  const effectivePitStopsDriver = pitStopsDriver ?? alphabeticalDrivers[0]?.driver_number ?? null
+  const effectiveTeamRadioDriver = teamRadioDriver ?? alphabeticalDrivers[0]?.driver_number ?? null
 
   // Derived, driver-filtered client-side from data already fetched above —
   // no extra backend endpoints needed for these three.
@@ -106,6 +137,44 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
     () => (selectedDrivers ? (stints.data ?? []).filter((s) => selectedDrivers.has(s.driver_number)) : (stints.data ?? [])),
     [stints.data, selectedDrivers]
   )
+  // Same filter, extended to every other driver-scoped table below — these
+  // previously ignored the driver picker entirely (also what shortens the
+  // overtakes list: pick the drivers you care about and only their
+  // involvements show).
+  const filteredRaceControl = useMemo(
+    () => (selectedDrivers ? (raceControl.data ?? []).filter((r) => r.driver_number == null || selectedDrivers.has(r.driver_number)) : (raceControl.data ?? [])),
+    [raceControl.data, selectedDrivers]
+  )
+  const filteredStartingGrid = useMemo(
+    () => (selectedDrivers ? (startingGrid.data ?? []).filter((r) => selectedDrivers.has(r.driver_number)) : (startingGrid.data ?? [])),
+    [startingGrid.data, selectedDrivers]
+  )
+  const filteredSessionResult = useMemo(
+    () => (selectedDrivers ? (sessionResult.data ?? []).filter((r) => selectedDrivers.has(r.driver_number)) : (sessionResult.data ?? [])),
+    [sessionResult.data, selectedDrivers]
+  )
+  // These three are scoped to ONE driver at a time (via their own dropdown
+  // above each table), not the page-level multi-driver filter — a full
+  // field's worth of overtakes/pit stops/radio calls is a lot of rows.
+  const filteredPitStops = useMemo(
+    () => (effectivePitStopsDriver == null ? [] : (pitStops.data ?? []).filter((r) => r.driver_number === effectivePitStopsDriver)),
+    [pitStops.data, effectivePitStopsDriver]
+  )
+  const filteredOvertakes = useMemo(
+    () =>
+      effectiveOvertakesDriver == null
+        ? []
+        : (overtakes.data ?? []).filter((r) => r.overtaking_driver_number === effectiveOvertakesDriver || r.overtaken_driver_number === effectiveOvertakesDriver),
+    [overtakes.data, effectiveOvertakesDriver]
+  )
+  const filteredDriverStandings = useMemo(
+    () => (selectedDrivers ? (driverStandings.data ?? []).filter((r) => r.driver_number != null && selectedDrivers.has(r.driver_number)) : (driverStandings.data ?? [])),
+    [driverStandings.data, selectedDrivers]
+  )
+  const filteredTeamRadio = useMemo(
+    () => (effectiveTeamRadioDriver == null ? [] : (teamRadio.data ?? []).filter((r) => r.driver_number === effectiveTeamRadioDriver)),
+    [teamRadio.data, effectiveTeamRadioDriver]
+  )
 
   return (
     <div className="flex flex-col gap-6">
@@ -136,7 +205,7 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
           <ChartSkeleton />
         ) : (
           <DataTable<RaceControlMessage>
-            rows={raceControl.data ?? []}
+            rows={filteredRaceControl}
             rowKey={(r) => `${r.date}-${r.category}-${r.message}`}
             columns={[
               { key: "date", label: "Time", render: (r) => new Date(r.date).toLocaleTimeString() },
@@ -226,7 +295,7 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
             <ChartSkeleton />
           ) : (
             <DataTable<StartingGridRow>
-              rows={startingGrid.data ?? []}
+              rows={filteredStartingGrid}
               rowKey={(r) => r.driver_number}
               columns={[
                 { key: "position", label: "Grid" },
@@ -242,7 +311,7 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
             <ChartSkeleton />
           ) : (
             <DataTable<SessionResultRow>
-              rows={sessionResult.data ?? []}
+              rows={filteredSessionResult}
               rowKey={(r) => r.driver_number}
               columns={[
                 { key: "position", label: "Pos", render: (r) => (r.dnf ? "DNF" : r.dns ? "DNS" : r.dsq ? "DSQ" : (r.position ?? "—")) },
@@ -260,36 +329,46 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
         </ChartCard>
 
         <ChartCard title="Pit stops">
-          {pitStops.isLoading ? (
-            <ChartSkeleton />
-          ) : (
-            <DataTable<PitStop>
-              rows={pitStops.data ?? []}
-              rowKey={(r) => `${r.driver_number}-${r.lap_number}`}
-              columns={[
-                { key: "driver_number", label: "Driver", render: (r) => nameOf(r.driver_number) },
-                { key: "lap_number", label: "Lap", align: "right" },
-                { key: "pit_lane_duration_s", label: "Lane time (s)", align: "right", render: (r) => (r.pit_lane_duration_s != null ? r.pit_lane_duration_s.toFixed(1) : "—") },
-                { key: "stop_duration", label: "Stop time (s)", align: "right", render: (r) => (r.stop_duration != null ? r.stop_duration.toFixed(1) : "—") },
-              ]}
-            />
-          )}
+          <div className="flex flex-col gap-3">
+            <DriverDropdown drivers={driverList} value={effectivePitStopsDriver} onChange={setPitStopsDriver} />
+            {pitStops.isLoading ? (
+              <ChartSkeleton />
+            ) : (
+              <DataTable<PitStop>
+                rows={filteredPitStops}
+                rowKey={(r) => `${r.driver_number}-${r.lap_number}`}
+                columns={[
+                  { key: "lap_number", label: "Lap", align: "right" },
+                  { key: "pit_lane_duration_s", label: "Lane time (s)", align: "right", render: (r) => (r.pit_lane_duration_s != null ? r.pit_lane_duration_s.toFixed(1) : "—") },
+                  {
+                    key: "stop_duration",
+                    label: "Stop time (s)",
+                    align: "right",
+                    render: (r) => (r.stop_duration != null ? `${r.stop_duration.toFixed(1)}${r.stop_duration_estimated ? " (est.)" : ""}` : "—"),
+                  },
+                ]}
+              />
+            )}
+          </div>
         </ChartCard>
 
         <ChartCard title="Overtakes">
-          {overtakes.isLoading ? (
-            <ChartSkeleton />
-          ) : (
-            <DataTable<Overtake>
-              rows={overtakes.data ?? []}
-              rowKey={(r) => `${r.date}-${r.overtaking_driver_number}-${r.overtaken_driver_number}`}
-              columns={[
-                { key: "overtaking_driver_number", label: "Passed by", render: (r) => nameOf(r.overtaking_driver_number) },
-                { key: "overtaken_driver_number", label: "Passed", render: (r) => nameOf(r.overtaken_driver_number) },
-                { key: "position", label: "New pos.", align: "right" },
-              ]}
-            />
-          )}
+          <div className="flex flex-col gap-3">
+            <DriverDropdown drivers={driverList} value={effectiveOvertakesDriver} onChange={setOvertakesDriver} />
+            {overtakes.isLoading ? (
+              <ChartSkeleton />
+            ) : (
+              <DataTable<Overtake>
+                rows={filteredOvertakes}
+                rowKey={(r) => `${r.date}-${r.overtaking_driver_number}-${r.overtaken_driver_number}`}
+                columns={[
+                  { key: "overtaking_driver_number", label: "Passed by", render: (r) => nameOf(r.overtaking_driver_number) },
+                  { key: "overtaken_driver_number", label: "Passed", render: (r) => nameOf(r.overtaken_driver_number) },
+                  { key: "position", label: "New pos.", align: "right" },
+                ]}
+              />
+            )}
+          </div>
         </ChartCard>
 
         <ChartCard title="Drivers' championship standing">
@@ -297,7 +376,7 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
             <ChartSkeleton />
           ) : (
             <DataTable<ChampionshipStanding>
-              rows={driverStandings.data ?? []}
+              rows={filteredDriverStandings}
               rowKey={(r) => r.driver_number!}
               columns={[
                 { key: "position_current", label: "Pos" },
@@ -338,19 +417,21 @@ export function ChartsView({ sessionKey }: { sessionKey: number }) {
       </div>
 
       <ChartCard title="Team radio">
-        {teamRadio.isLoading ? (
-          <ChartSkeleton />
-        ) : (
-          <DataTable<TeamRadioMessage>
-            rows={teamRadio.data ?? []}
-            rowKey={(r) => `${r.driver_number}-${r.date}`}
-            columns={[
-              { key: "driver_number", label: "Driver", render: (r) => nameOf(r.driver_number) },
-              { key: "date", label: "Time", render: (r) => new Date(r.date).toLocaleTimeString() },
-              { key: "recording_url", label: "Recording", render: (r) => <audio controls preload="none" src={r.recording_url} className="h-8" /> },
-            ]}
-          />
-        )}
+        <div className="flex flex-col gap-3">
+          <DriverDropdown drivers={driverList} value={effectiveTeamRadioDriver} onChange={setTeamRadioDriver} />
+          {teamRadio.isLoading ? (
+            <ChartSkeleton />
+          ) : (
+            <DataTable<TeamRadioMessage>
+              rows={filteredTeamRadio}
+              rowKey={(r) => `${r.driver_number}-${r.date}`}
+              columns={[
+                { key: "date", label: "Time", render: (r) => new Date(r.date).toLocaleTimeString() },
+                { key: "recording_url", label: "Recording", render: (r) => <audio controls preload="none" src={r.recording_url} className="h-8" /> },
+              ]}
+            />
+          )}
+        </div>
       </ChartCard>
     </div>
   )

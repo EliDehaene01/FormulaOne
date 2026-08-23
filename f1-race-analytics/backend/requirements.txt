@@ -8,3 +8,4 @@ uvicorn
 optuna
 chromadb
 captum
+azure-ai-evaluation

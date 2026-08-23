@@ -33,6 +33,30 @@ def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
+def _resolve_session_in_meeting(conn: sqlite3.Connection, session_key: int, target_session_name: str) -> int:
+    """
+    Given any session_key, find the session_key of the session named
+    `target_session_name` (e.g. "Qualifying") in the SAME race weekend
+    (meeting_key) — falling back to the original session_key if no such
+    session exists (or it's already that session). Shared by every place
+    that needs "this weekend's Qualifying/Sprint Qualifying session
+    regardless of which session the caller actually has selected": grid
+    data is keyed to the qualifying session on OpenF1 (see get_starting_grid),
+    and the qualifying prediction model only ever has data for real
+    Qualifying sessions (see predict_qualifying_pace).
+    """
+    session = pd.read_sql("SELECT meeting_key, session_name FROM sessions WHERE session_key = ?", conn, params=[session_key])
+    if session.empty or session.iloc[0]["session_name"] == target_session_name:
+        return session_key
+
+    target = pd.read_sql(
+        "SELECT session_key FROM sessions WHERE meeting_key = ? AND session_name = ?",
+        conn,
+        params=[int(session.iloc[0]["meeting_key"]), target_session_name],
+    )
+    return int(target.iloc[0]["session_key"]) if not target.empty else session_key
+
+
 def search_knowledge_base(query: str, k: int = 3) -> list[dict]:
     """
     Semantic search over Pit Wall's F1 knowledge base (glossary terms, tyre
@@ -373,6 +397,16 @@ def get_race_control_messages(session_key: int) -> list[dict]:
         params=[session_key],
     )
     conn.close()
+    # Most messages aren't flag-category or don't name a specific car — flag
+    # and driver_number are legitimately NaN then, which isn't valid JSON
+    # (was silently 500ing this whole endpoint, indistinguishable in the UI
+    # from "no messages at all"). None is the honest "not applicable" value.
+    df["flag"] = df["flag"].astype(object).where(df["flag"].notna(), None)
+    # NOTE: .apply(lambda v: ... else None) does NOT work here — pandas
+    # silently re-infers the result Series back to float64 (turning None
+    # back into NaN) even from object-dtype input. .where() on an
+    # already-object-dtype Series is what actually keeps None as None.
+    df["driver_number"] = df["driver_number"].astype(object).where(df["driver_number"].notna(), None)
     return df.to_dict("records")
 
 
@@ -392,8 +426,37 @@ def get_pit_stops(session_key: int, driver_number: int | None = None) -> list[di
     df["pit_lane_duration_s"] = df["pit_duration"] if "pit_duration" in df.columns else df.get("lane_duration")
     if "lane_duration" in df.columns:
         df["pit_lane_duration_s"] = df["pit_lane_duration_s"].fillna(df["lane_duration"])
-    cols = [c for c in ["driver_number", "lap_number", "pit_lane_duration_s", "stop_duration"] if c in df.columns or c == "pit_lane_duration_s"]
-    return df.sort_values(["driver_number", "lap_number"])[cols].to_dict("records")
+
+    # stop_duration (the stationary box time) is only reported by OpenF1
+    # from a certain race onward — NaN before that. We can approximate it
+    # from pit_lane_duration_s (the full pit-LANE time: deceleration, drive
+    # to the box, the stop, drive out, acceleration back up) for a genuine
+    # quick stop: fit empirically across every row in this project's whole
+    # cache that has BOTH values (1,038 rows) — the gap between lane time
+    # and stop time is tight (mean ~20.7s, std ~2.9s), i.e. driving in and
+    # out costs roughly a constant ~20.7s regardless of how long the actual
+    # stop was. Only applied when pit_lane_duration_s itself looks like a
+    # genuine quick stop (<70s, the observed max across every real
+    # stop_duration row) — a much longer lane time is very likely a long
+    # garage stay, red-flag stoppage, or repair, where subtracting a
+    # constant would produce a nonsense number instead of an honest guess.
+    PIT_LANE_TRANSIT_OVERHEAD_S = 20.7
+    PLAUSIBLE_QUICK_STOP_LANE_DURATION_S = 70
+    if "stop_duration" not in df.columns:
+        df["stop_duration"] = None
+    df["stop_duration_estimated"] = False
+    can_estimate = df["stop_duration"].isna() & df["pit_lane_duration_s"].notna() & (df["pit_lane_duration_s"] < PLAUSIBLE_QUICK_STOP_LANE_DURATION_S)
+    df.loc[can_estimate, "stop_duration"] = (df.loc[can_estimate, "pit_lane_duration_s"] - PIT_LANE_TRANSIT_OVERHEAD_S).round(1)
+    df.loc[can_estimate, "stop_duration_estimated"] = True
+
+    cols = ["driver_number", "lap_number", "pit_lane_duration_s", "stop_duration", "stop_duration_estimated"]
+    result = df.sort_values(["driver_number", "lap_number"])[cols]
+    # NaN isn't valid JSON — pit_lane_duration_s/stop_duration are still
+    # occasionally missing outright (no lane time recorded, or a long stop
+    # with no real stop_duration and too long to estimate).
+    for col in ("pit_lane_duration_s", "stop_duration"):
+        result[col] = result[col].astype(object).where(result[col].notna(), None)
+    return result.to_dict("records")
 
 
 def get_intervals(session_key: int, driver_number: int | None = None) -> list[dict]:
@@ -446,18 +509,47 @@ def get_session_result(session_key: int) -> list[dict]:
         params=[session_key],
     )
     conn.close()
+    # A lapped-down or DNF finisher has no recorded total duration — NaN,
+    # not valid JSON (was silently 500ing this whole endpoint, which the UI
+    # can't tell apart from "no results at all"). gap_to_leader is handled
+    # the same way for the same reason (it can also be missing outright).
+    for col in ("duration", "gap_to_leader"):
+        df[col] = df[col].astype(object).where(df[col].notna(), None)
     return df.to_dict("records")
 
 
 def get_starting_grid(session_key: int) -> list[dict]:
-    """Starting grid order for a Race/Sprint session, with the qualifying lap time that earned each slot."""
+    """
+    Starting grid order for a Race/Sprint session, with the qualifying lap
+    time that earned each slot.
+
+    OpenF1's /starting_grid data is keyed to the QUALIFYING (or Sprint
+    Qualifying) session of that race weekend, never the Race/Sprint session
+    itself — confirmed empirically, not documented anywhere obvious: every
+    row this project has ever cached is attached to a Qualifying-type
+    session_key. Passing a Race session_key straight through always came
+    back empty, so this resolves to the matching qualifying session in the
+    same meeting first.
+    """
     conn = _connect()
+    session = pd.read_sql("SELECT session_name FROM sessions WHERE session_key = ?", conn, params=[session_key])
+    if session.empty:
+        conn.close()
+        return []
+
+    quali_name = "Sprint Qualifying" if session.iloc[0]["session_name"] == "Sprint" else "Qualifying"
+    grid_session_key = _resolve_session_in_meeting(conn, session_key, quali_name)
+
     df = pd.read_sql(
         "SELECT driver_number, position, lap_duration FROM starting_grid WHERE session_key = ? ORDER BY position",
         conn,
-        params=[session_key],
+        params=[grid_session_key],
     )
     conn.close()
+    # A grid slot with no valid qualifying time (e.g. a pit-lane start) has
+    # NaN here — not valid JSON, so it must become None before this crosses
+    # the API boundary (same NaN-isn't-JSON issue as elsewhere in this file).
+    df["lap_duration"] = df["lap_duration"].astype(object).where(df["lap_duration"].notna(), None)
     return df.to_dict("records")
 
 
@@ -471,6 +563,7 @@ def get_driver_championship_standings(session_key: int) -> list[dict]:
         params=[session_key],
     )
     conn.close()
+    df["position_start"] = df["position_start"].astype(object).where(df["position_start"].notna(), None)
     return df.to_dict("records")
 
 
@@ -484,6 +577,7 @@ def get_team_championship_standings(session_key: int) -> list[dict]:
         params=[session_key],
     )
     conn.close()
+    df["position_start"] = df["position_start"].astype(object).where(df["position_start"].notna(), None)
     return df.to_dict("records")
 
 
@@ -559,9 +653,14 @@ def predict_qualifying_pace(session_key: int) -> dict:
     checkpoint = torch.load(CHECKPOINT_PATH, weights_only=False)
 
     conn = _connect()
+    # The model only ever has a row for a real Qualifying session — resolve
+    # whatever session the caller actually has selected (a Race, Practice,
+    # Sprint, anything) to that same race weekend's Qualifying session, so
+    # this works regardless of which session is currently selected in the UI.
+    qualifying_session_key = _resolve_session_in_meeting(conn, session_key, "Qualifying")
     df = build_feature_table(conn)
     conn.close()
-    session_df = df[df["session_key"] == session_key]
+    session_df = df[df["session_key"] == qualifying_session_key]
     if session_df.empty:
         return {"error": f"session {session_key} has no cached practice+qualifying data to predict from"}
 
@@ -596,7 +695,7 @@ def predict_qualifying_pace(session_key: int) -> dict:
     actual_pole = results.sort_values("actual_lap_time_s").iloc[0]
 
     return {
-        "session_key": session_key,
+        "session_key": qualifying_session_key,
         "predicted_pole_driver_number": int(predicted_pole["driver_number"]),
         "predicted_pole_time_s": float(predicted_pole["predicted_lap_time_s"]),
         "actual_pole_driver_number": int(actual_pole["driver_number"]),
@@ -626,8 +725,14 @@ def explain_qualifying_prediction(session_key: int, driver_number: int, top_n: i
     if not CHECKPOINT_PATH.exists():
         return {"error": "no trained model checkpoint found — run `python -m backend.models.train` first"}
 
+    conn = _connect()
+    # Same resolution as predict_qualifying_pace — works no matter which
+    # session of the weekend the caller actually has selected.
+    qualifying_session_key = _resolve_session_in_meeting(conn, session_key, "Qualifying")
+    conn.close()
+
     try:
-        result = explain_prediction(session_key, driver_number)
+        result = explain_prediction(qualifying_session_key, driver_number)
     except ValueError as exc:
         return {"error": str(exc)}
 

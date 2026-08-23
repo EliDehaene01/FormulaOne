@@ -38,11 +38,24 @@ already have exactly right.
 
 import json
 import os
+import time
 
 import pandas as pd
 
 from backend.llm.client import SYSTEM_PROMPT, _get_client
-from backend.llm.tools import _connect, get_drivers, get_position_changes, get_race_control_messages, get_tire_strategy
+from backend.observability import log_call
+from backend.llm.tools import (
+    _connect,
+    get_drivers,
+    get_overtakes,
+    get_pit_stops,
+    get_position_changes,
+    get_race_control_messages,
+    get_session_result,
+    get_starting_grid,
+    get_tire_strategy,
+    get_weather,
+)
 
 RESPONSE_SCHEMA = {
     "type": "json_schema",
@@ -56,13 +69,19 @@ RESPONSE_SCHEMA = {
                     "type": "string",
                     "description": (
                         "A long, detailed recap — roughly one A4 page (about 600-800 words, "
-                        "8-12 paragraphs). Cover the race chronologically: the start and any "
-                        "early incidents, how the tyre strategies played out stint by stint for "
-                        "the notable drivers, key overtakes and position changes, every race "
-                        "control event worth mentioning (flags, penalties, safety cars), and a "
-                        "closing summary of the result. Don't pad with repetition — go into more "
-                        "specific, concrete detail than a short recap would, using the real data "
-                        "provided."
+                        "8-12 paragraphs) — of THIS ONE SESSION ONLY, whichever session "
+                        "`session_info` says it is (Practice/Qualifying/Sprint Qualifying/"
+                        "Sprint/Race). Never call it 'the race' if session_info says otherwise. "
+                        "For a Race or Sprint: the start and any early incidents, how tyre "
+                        "strategies played out stint by stint, key overtakes, pit stop timing, "
+                        "every race control event worth mentioning, weather/track conditions, "
+                        "and the final classification. For Qualifying or Sprint Qualifying: who "
+                        "set pole and by how much, notable improving/faltering drivers across "
+                        "the session, weather/track conditions, any red/yellow flags, and the "
+                        "final grid order. For Practice: who set the pace, any incidents or "
+                        "flags, and what's visible about long-run vs. quali-sim work. Don't pad "
+                        "with repetition — go into more specific, concrete detail than a short "
+                        "recap would, using the real data provided."
                     ),
                 },
             },
@@ -135,6 +154,22 @@ def _lap_time_deltas(laps: pd.DataFrame) -> list[dict]:
     return clean[["driver_number", "lap_number", "lap_duration", "delta_to_fastest_s"]].to_dict("records")
 
 
+def _session_info(session_key: int) -> dict:
+    """
+    Which session this actually is — Practice/Qualifying/Sprint/Race, the
+    circuit, the meeting — so the narrative can frame itself correctly
+    instead of defaulting to race-shaped language for every session type.
+    """
+    conn = _connect()
+    df = pd.read_sql(
+        "SELECT s.session_name, s.session_type, s.year, s.circuit_short_name, m.meeting_name "
+        "FROM sessions s LEFT JOIN meetings m ON s.meeting_key = m.meeting_key WHERE s.session_key = ?",
+        conn, params=[session_key],
+    )
+    conn.close()
+    return {} if df.empty else df.iloc[0].to_dict()
+
+
 def _laps_for(session_key: int) -> pd.DataFrame:
     conn = _connect()
     laps = pd.read_sql(
@@ -153,6 +188,7 @@ def get_lap_time_deltas(session_key: int) -> list[dict]:
 def build_race_summary(session_key: int) -> dict:
     laps = _laps_for(session_key)
 
+    session_info = _session_info(session_key)
     key_moments = _compute_key_moments(session_key, laps)
     race_control = get_race_control_messages(session_key)
     tire_strategy = get_tire_strategy(session_key)
@@ -160,15 +196,32 @@ def build_race_summary(session_key: int) -> dict:
     lap_time_deltas = _lap_time_deltas(laps)
     drivers = get_drivers(session_key)  # so the narrative can name drivers, not just cite numbers
 
+    # Beyond the original 5 (drivers/laps/position/stints/race_control):
+    # weather, pit stop timing, final classification, overtakes, and the
+    # starting grid — more of what actually happened this session for the
+    # model to draw a genuinely detailed, concrete narrative from.
+    weather = get_weather(session_key)
+    pit_stops = get_pit_stops(session_key)
+    session_result = get_session_result(session_key)
+    overtakes = get_overtakes(session_key)
+    starting_grid = get_starting_grid(session_key)
+
     prompt_data = {
+        "session_info": session_info,
         "drivers": drivers,
         "key_moments": key_moments,
         "race_control_messages": race_control,
         "tire_strategy": tire_strategy,
+        "weather": weather,
+        "pit_stops": pit_stops,
+        "session_result": session_result,
+        "overtakes": overtakes,
+        "starting_grid": starting_grid,
     }
 
     client = _get_client()
     deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini")
+    start = time.perf_counter()
     response = client.chat.completions.create(
         model=deployment,
         messages=[
@@ -176,15 +229,24 @@ def build_race_summary(session_key: int) -> dict:
             {
                 "role": "user",
                 "content": (
-                    "Write a long, detailed race recap using ONLY the data below (see the "
-                    "response schema for exactly how long and what to cover). Do not invent any "
-                    "lap times, positions, drivers, or events not present here. Use the `drivers` "
-                    "list to refer to drivers by full name and number together, per your "
-                    "instructions.\n\n" + json.dumps(prompt_data, default=str)
+                    "Write a long, detailed recap of ONLY the single session described in "
+                    "`session_info` below — using ONLY the data below. Do not invent any lap "
+                    "times, positions, drivers, or events not present here, and do not describe "
+                    "events from any other session. Use the `drivers` list to refer to drivers "
+                    "by full name and number together, per your instructions.\n\n"
+                    + json.dumps(prompt_data, default=str)
                 ),
             },
         ],
         response_format=RESPONSE_SCHEMA,
+    )
+    log_call(
+        call_type="chat",
+        deployment=deployment,
+        input_tokens=response.usage.prompt_tokens if response.usage else 0,
+        output_tokens=response.usage.completion_tokens if response.usage else 0,
+        latency_ms=(time.perf_counter() - start) * 1000,
+        caller="llm.summary.build_race_summary",
     )
     narrative = json.loads(response.choices[0].message.content)
 
