@@ -38,6 +38,7 @@ EARLY_STOP_PATIENCE = 20  # stop if val MAE hasn't improved in this many epochs
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 CHECKPOINT_PATH = DB_PATH.parent / "qualifying_model.pt"
+EXPERIMENT_NAME = "qualifying-lap-time-predictor"
 
 
 def _configure_mlflow() -> None:
@@ -61,7 +62,7 @@ def _configure_mlflow() -> None:
     """
     os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
     mlflow.set_tracking_uri((DB_PATH.parent / "mlruns").as_uri())
-    mlflow.set_experiment("qualifying-lap-time-predictor")
+    mlflow.set_experiment(EXPERIMENT_NAME)
 
 
 def _temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -177,7 +178,7 @@ def train_model(
         mlflow.set_tag("run_type", "final" if save_checkpoint else "trial")
         if mlflow_tags:
             mlflow.set_tags(mlflow_tags)
-        return _train_model(
+        result = _train_model(
             hidden_sizes=hidden_sizes,
             dropout=dropout,
             learning_rate=learning_rate,
@@ -187,6 +188,16 @@ def train_model(
             early_stop_patience=early_stop_patience,
             save_checkpoint=save_checkpoint,
         )
+
+    # Imported here, not at module level -- experiment_log.py imports
+    # EXPERIMENT_NAME/_configure_mlflow from this module, so a top-level
+    # import here would be circular. Runs after the `with` block so the run
+    # is already finalized (mlflow.end_run() has fired) before we read it
+    # back via search_runs().
+    from backend.models.experiment_log import write_experiment_log
+
+    write_experiment_log()
+    return result
 
 
 def _train_model(
