@@ -6,16 +6,10 @@ action, a written recap, a chat assistant you can ask follow-up questions, and a
 machine-learning model that estimates qualifying pace — every number in it pulled
 from real timing data, never guessed or made up.
 
-It's a portfolio project that ties together a few things end to end: a data
+It's a hobby project that ties together a few things end to end: a data
 pipeline over a public F1 timing API, a small PyTorch model with proper
 evaluation and explainability, and an LLM assistant that answers by calling real
 data-lookup tools instead of relying on its own memory.
-
-<!-- TODO: replace with an up-to-date screenshot or a short GIF of the app -->
-![Pit Wall screenshot](f1-race-analytics/pit-wall-screenshot.png)
-
-<!-- TODO: add the live demo link here once deployed -->
-<!-- **[Live demo »](https://your-deployment-url)** -->
 
 ---
 
